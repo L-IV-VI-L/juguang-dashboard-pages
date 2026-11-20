@@ -67,6 +67,15 @@ jobs:
           site = Path("_site")
           site.mkdir()
           (site / "index.html").write_bytes(page)
+          # Releases before the update feed had no template revision marker.
+          if b'<meta name="dashboard-template"' in page:
+              revisions = re.findall(rb'<meta name="dashboard-template" content="([a-f0-9]{64})">', page)
+              snapshots = re.findall(rb'<script id="dashboardData" type="application/json">([^<]*)</script>', page)
+              if len(revisions) != 1 or len(snapshots) != 1:
+                  raise ValueError("Expected one template revision and one public snapshot")
+              update = {"template": revisions[0].decode("ascii"), "data": json.loads(snapshots[0])}
+              (site / "dashboard-update.json").write_text(
+                  json.dumps(update, ensure_ascii=False, separators=(",", ":"), allow_nan=False), encoding="utf-8")
           shutil.copyfile("assets/Source-Han-Sans-OFL.txt", site / "Source-Han-Sans-OFL.txt")
           print("Verified V1 HTML SHA-256", fields["sha256"])
       - uses: actions/upload-pages-artifact@v4
