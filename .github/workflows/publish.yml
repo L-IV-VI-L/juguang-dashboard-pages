@@ -1,0 +1,86 @@
+name: Publish the V1 dashboard
+
+on:
+  workflow_dispatch:
+    inputs:
+      page:
+        description: Gzip/base64 V1 page with the fixed font and badge omitted
+        required: true
+        type: string
+      sha256:
+        description: SHA-256 of the complete original index.html
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify and reconstruct the public V1 page
+        shell: python
+        run: |
+          import base64
+          import gzip
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+
+          fields = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["inputs"]
+          if len(fields["page"]) > 65000 or not re.fullmatch("[a-f0-9]{64}", fields["sha256"]):
+              raise ValueError("Invalid dispatch size or digest")
+          packed = base64.b64decode(fields["page"], validate=True)
+          with gzip.GzipFile(fileobj=io.BytesIO(packed)) as stream:
+              page = stream.read(1024 * 1024 + 1)
+          if len(page) > 1024 * 1024:
+              raise ValueError("Unexpected V1 page size")
+
+          # The publisher selects the display fields; verify transport integrity here.
+          assets = [
+              (b"data:font/otf;base64,", b"__FONT__", "source-han-sans-sc-vf-dashboard.otf",
+               "561fb680296bd62ad11cc4eb793a38531f6b2f55f5e44d06b76a79aff163def6"),
+              (b"data:image/png;base64,", b"__BADGE__", "official-gold-badge.png",
+               "e2ab78cea470415dba93c5f30b8827aa647762435ba7dbe8c324299052fe9f8c"),
+          ]
+          for prefix, marker, name, sha256 in assets:
+              blob = (Path("assets") / name).read_bytes()
+              if hashlib.sha256(blob).hexdigest() != sha256 or page.count(prefix + marker) != 1:
+                  raise ValueError(f"Invalid release asset: {name}")
+              page = page.replace(prefix + marker, prefix + base64.b64encode(blob))
+          if hashlib.sha256(page).hexdigest() != fields["sha256"]:
+              raise ValueError("Reconstructed HTML checksum differs from the source HTML")
+          site = Path("_site")
+          site.mkdir()
+          (site / "index.html").write_bytes(page)
+          shutil.copyfile("assets/Source-Han-Sans-OFL.txt", site / "Source-Han-Sans-OFL.txt")
+          print("Verified V1 HTML SHA-256", fields["sha256"])
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.publish.outputs.page_url }}
+    steps:
+      - id: publish
+        uses: actions/deploy-pages@v4
